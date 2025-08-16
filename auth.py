@@ -44,6 +44,6 @@ def callback(request: Request, code: str):
     SESSIONS[session_id] = token_data
     print(f"Created session {session_id} with token data")
 
-    redirect_url = f"https://N1jl0091.github.io/strava-csv-frontend/activities.html?session_id={session_id}"
+    redirect_url = f"https://N1jl0091.github.io/optcad_frontend/activities.html?session_id={session_id}"
     print(f"Redirecting user to frontend URL: {redirect_url}")
     return RedirectResponse(redirect_url)
