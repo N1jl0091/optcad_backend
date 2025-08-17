@@ -13,19 +13,44 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 
-def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
-    logger.info("Preparing data: filtering moving rows")
-    df = filter_rows(df, df['moving'] == True)
-    logger.info(f"Filtered rows, remaining: {len(df)}")
+def prepare_data(stream_data: dict) -> pd.DataFrame:
+    """
+    Convert stream data from Strava API into a proper DataFrame and prepare it for computation.
+    Filters out non-moving rows, computes diffs, and ensures numeric types.
+    """
+    logger.info("Preparing data: converting stream_data to DataFrame")
+    df = pd.DataFrame(stream_data)
 
+    # Ensure all required columns exist
+    required_columns = ['time', 'distance', 'altitude', 'moving', 'cadence', 'speed']
+    for col in required_columns:
+        if col not in df.columns:
+            df[col] = np.nan  # Fill missing columns with NaN
+
+    # Convert types
+    df['moving'] = df['moving'].astype(bool)
+    df['distance'] = pd.to_numeric(df['distance'], errors='coerce')
+    df['altitude'] = pd.to_numeric(df['altitude'], errors='coerce')
+    df['cadence'] = pd.to_numeric(df['cadence'], errors='coerce')
+    df['speed'] = pd.to_numeric(df['speed'], errors='coerce')
+
+    # Filter moving rows
+    logger.info("Filtering moving rows")
+    df = df[df['moving']].copy()
+    logger.info(f"Remaining rows after filtering: {len(df)}")
+
+    # Compute differences
     logger.info("Computing distance differences")
-    df['distance_diff'] = compute_diff(df, 'Distance')
+    df['distance_diff'] = compute_diff(df, 'distance')
     logger.info("Computing altitude differences")
-    df['altitude_diff'] = compute_diff(df, 'Altitude')
+    df['altitude_diff'] = compute_diff(df, 'altitude')
 
-    df = filter_rows(df, df['distance_diff'] > 1)
-    logger.info(f"Filtered small distance differences, remaining: {len(df)}")
+    # Filter out small distance differences
+    df = df[df['distance_diff'] > 1].copy()
+    logger.info(f"Remaining rows after distance diff filter: {len(df)}")
+
     return df
+
 
 
 def calculate_gradient(df: pd.DataFrame, window: int = config.GRADIENT_WINDOW) -> pd.DataFrame:
