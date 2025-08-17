@@ -1,30 +1,24 @@
-# main.py
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 from auth import router as auth_router
 from activities import router as activities_router
-from compute.optcad_compute import process_activity_stream
-from compute.config import TIME_LIMIT_SEC  # Example import to confirm config is loaded
+from streams import router as streams_router  # ✅ correct
 
 app = FastAPI()
 
-# CORS setup to allow frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://n1jl0091.github.io"],  # Your frontend
+    allow_origins=["https://n1jl0091.github.io"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Include routers
 app.include_router(auth_router)
 app.include_router(activities_router)
-app.include_router(streams_router)
-
-print(f"Starting app. TIME_LIMIT_SEC from config: {TIME_LIMIT_SEC}")
+app.include_router(streams_router)  # ✅ now works
 
 if __name__ == "__main__":
     import os
