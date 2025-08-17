@@ -12,19 +12,21 @@ formatter = logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s")
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 
+
 def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
     logger.info("Preparing data: filtering moving rows")
     df = filter_rows(df, df['moving'] == True)
     logger.info(f"Filtered rows, remaining: {len(df)}")
-    
+
     logger.info("Computing distance differences")
     df['distance_diff'] = compute_diff(df, 'Distance')
     logger.info("Computing altitude differences")
     df['altitude_diff'] = compute_diff(df, 'Altitude')
-    
+
     df = filter_rows(df, df['distance_diff'] > 1)
     logger.info(f"Filtered small distance differences, remaining: {len(df)}")
     return df
+
 
 def calculate_gradient(df: pd.DataFrame, window: int = config.GRADIENT_WINDOW) -> pd.DataFrame:
     logger.info(f"Calculating gradient with window: {window}")
@@ -33,15 +35,16 @@ def calculate_gradient(df: pd.DataFrame, window: int = config.GRADIENT_WINDOW) -
     if invalid_gradients > 0:
         logger.info(f"Setting {invalid_gradients} extreme gradients to NaN")
     df.loc[(df['gradient_raw'] > 30) | (df['gradient_raw'] < -30), 'gradient_raw'] = np.nan
-    
+
     df['MA_gradient_raw'] = df['gradient_raw'].rolling(window=window, center=True, min_periods=1).mean()
     df['MA_gradient_raw'] = df['MA_gradient_raw'].interpolate(method='linear')
     logger.info("Gradient calculation complete")
     return df
 
+
 def segment_ride(df: pd.DataFrame, time_limit: float = config.TIME_LIMIT_SEC, grad_limit: float = config.GRAD_LIMIT_PCT) -> pd.DataFrame:
     logger.info(f"Segmenting ride with time_limit={time_limit} sec and grad_limit={grad_limit}%")
-    
+
     segment_id = 0
     time_since_segment = 0.0
     grad_base = 0.0
@@ -77,7 +80,9 @@ def segment_ride(df: pd.DataFrame, time_limit: float = config.TIME_LIMIT_SEC, gr
         grad_bases.append(grad_base)
 
         if idx % 1000 == 0:
-            logger.debug(f"Row {idx}: segment_id={segment_id}, time_since_segment={time_since_segment}, grad_base={grad_base}")
+            logger.debug(
+                f"Row {idx}: segment_id={segment_id}, time_since_segment={time_since_segment}, grad_base={grad_base}"
+            )
 
     logger.info(f"Segmentation complete: total segments={segment_id}")
     df['segment_id'] = segment_ids
@@ -85,6 +90,7 @@ def segment_ride(df: pd.DataFrame, time_limit: float = config.TIME_LIMIT_SEC, gr
     df['time_since_segment'] = time_since_segments
     df['grad_baseline'] = grad_bases
     return df
+
 
 def calculate_cadence_elevation(df: pd.DataFrame) -> pd.DataFrame:
     logger.info("Calculating cadence and elevation gain")
@@ -94,6 +100,7 @@ def calculate_cadence_elevation(df: pd.DataFrame) -> pd.DataFrame:
     logger.info("Cadence and elevation calculation complete")
     return df
 
+
 def aggregate_segments(df: pd.DataFrame) -> pd.DataFrame:
     logger.info("Aggregating segments")
     agg_df = df.groupby('segment_id').agg(
@@ -101,18 +108,35 @@ def aggregate_segments(df: pd.DataFrame) -> pd.DataFrame:
         speed_mean=('speed', 'mean'),
         elev_gain_mean=('elev_gain', 'mean'),
         distance_sum=('distance_diff', 'sum'),
-        gradient_mean=('MA_gradient_raw', 'mean')
+        gradient_mean=('MA_gradient_raw', 'mean'),
     ).reset_index()
     logger.info(f"Aggregation complete: {len(agg_df)} segments")
     return agg_df
 
+
 def compute_scores(df: pd.DataFrame, a=config.EXERTION_A, b=config.EXERTION_B, c=config.EXERTION_C) -> pd.DataFrame:
     logger.info("Computing performance and exertion scores")
     df = df.copy()
-    df['Exertion_Score'] = ((df['elev_gain_mean'] * df['gradient_mean']**a) + 
-                            (df['cadence_nonzero_mean']**b)) / (df['speed_mean']**c)
+    df['Exertion_Score'] = (
+        (df['elev_gain_mean'] * df['gradient_mean'] ** a) + (df['cadence_nonzero_mean'] ** b)
+    ) / (df['speed_mean'] ** c)
     df['Performance_Score'] = df['speed_mean'] / df['Exertion_Score']
     logger.info("Score computation complete")
     return df
 
-def cadence_binning(df: pd.DataFrame, bin_size=config.BIN_SIZE) ->_
+
+def cadence_binning(df: pd.DataFrame, bin_size=config.BIN_SIZE) -> pd.DataFrame:
+    logger.info("Binning cadence values")
+    df = df.copy()
+    df['cadence_bin'] = (df['cadence_nonzero_mean'] // bin_size) * bin_size
+    bin_df = (
+        df.groupby('cadence_bin', as_index=False)
+        .agg({
+            'Performance_Score': 'mean',
+            'cadence_nonzero_mean': 'mean',
+        })
+        .rename(columns={'cadence_nonzero_mean': 'mean_cadence'})
+    )
+    logger.info("Cadence binning complete")
+    return bin_df
+
