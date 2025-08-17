@@ -5,7 +5,7 @@ import uvicorn
 
 from auth import router as auth_router
 from activities import router as activities_router
-from streams import router as streams_router
+from compute.optcad_compute import process_activity_stream
 from compute.config import TIME_LIMIT_SEC  # Example import to confirm config is loaded
 
 app = FastAPI()
