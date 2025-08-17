@@ -1,49 +1,61 @@
-from fastapi import APIRouter, Request
+# auth.py
+from fastapi import APIRouter, HTTPException
 from fastapi.responses import RedirectResponse
 import requests
-import uuid
-from config import SESSIONS, STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET, REDIRECT_URI
+from typing import Dict
+import os
 
 router = APIRouter()
 
+# In-memory session storage (for demo; replace with DB in prod)
+SESSIONS: Dict[str, Dict] = {}
+
+STRAVA_CLIENT_ID = os.environ.get("STRAVA_CLIENT_ID")
+STRAVA_CLIENT_SECRET = os.environ.get("STRAVA_CLIENT_SECRET")
+STRAVA_REDIRECT_URI = os.environ.get("STRAVA_REDIRECT_URI", "https://n1jl0091.github.io/activities.html")
+
 @router.get("/auth")
-def auth():
-    print("Received request to /auth endpoint")
-    if not STRAVA_CLIENT_ID or not STRAVA_CLIENT_SECRET:
-        print("ERROR: STRAVA_CLIENT_ID or STRAVA_CLIENT_SECRET not set")
-        return {"error": "Server configuration error"}
+def auth_redirect():
+    """Redirect user to Strava authorization"""
+    if not STRAVA_CLIENT_ID:
+        raise HTTPException(status_code=500, detail="Missing Strava client ID")
+    
     url = (
-        f"https://www.strava.com/oauth/authorize"
-        f"?client_id={STRAVA_CLIENT_ID}"
-        f"&redirect_uri={REDIRECT_URI}"
-        f"&response_type=code"
-        f"&scope=activity:read_all"
+        f"https://www.strava.com/oauth/authorize?"
+        f"client_id={STRAVA_CLIENT_ID}&"
+        f"response_type=code&"
+        f"redirect_uri={STRAVA_REDIRECT_URI}&"
+        f"scope=activity:read_all&"
+        f"approval_prompt=auto"
     )
-    print(f"Redirecting user to Strava auth URL: {url}")
     return RedirectResponse(url)
 
-@router.get("/callback")
-def callback(request: Request, code: str):
-    print(f"Received callback with code: {code}")
-    token_response = requests.post("https://www.strava.com/oauth/token", data={
+@router.get("/auth/callback")
+def auth_callback(code: str):
+    """Handle Strava OAuth callback"""
+    if not STRAVA_CLIENT_ID or not STRAVA_CLIENT_SECRET:
+        raise HTTPException(status_code=500, detail="Missing Strava credentials")
+    
+    # Exchange code for access token
+    token_url = "https://www.strava.com/oauth/token"
+    resp = requests.post(token_url, data={
         "client_id": STRAVA_CLIENT_ID,
         "client_secret": STRAVA_CLIENT_SECRET,
         "code": code,
         "grant_type": "authorization_code"
     })
-
-    print(f"Strava token response status: {token_response.status_code}")
-    try:
-        token_data = token_response.json()
-        print(f"Token data received: {token_data}")
-    except Exception as e:
-        print(f"Failed to decode token response JSON: {e}")
-        return {"error": "Failed to parse token response"}
-
+    if resp.status_code != 200:
+        raise HTTPException(status_code=500, detail="Failed to get access token")
+    
+    token_data = resp.json()
+    # Generate session ID (simple example)
+    import uuid
     session_id = str(uuid.uuid4())
-    SESSIONS[session_id] = token_data
-    print(f"Created session {session_id} with token data")
-
-    redirect_url = f"https://N1jl0091.github.io/optcad_frontend/activities.html?session_id={session_id}"
-    print(f"Redirecting user to frontend URL: {redirect_url}")
-    return RedirectResponse(redirect_url)
+    SESSIONS[session_id] = {
+        "access_token": token_data["access_token"],
+        "refresh_token": token_data["refresh_token"],
+        "expires_at": token_data.get("expires_at")
+    }
+    
+    # Redirect to frontend with session_id in query string
+    return RedirectResponse(f"{STRAVA_REDIRECT_URI}?session_id={session_id}")
