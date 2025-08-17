@@ -1,232 +1,292 @@
-# compute/optcad_compute.py
-import logging
-from typing import Any, Dict, List
-
+# compute/core.py
 import pandas as pd
-
-from .core import (
-    prepare_data,
-    calculate_gradient,
-    segment_ride,
-    calculate_cadence_elevation,
-    aggregate_segments,
-    compute_scores,
-    optimal_cadence,
-    cadence_binning,
-)
-from .config import (
-    TIME_LIMIT_SEC,
-    GRAD_LIMIT_PCT,
-    GRADIENT_WINDOW,
-    BIN_SIZE,
-    EXERTION_A,
-    EXERTION_B,
-    EXERTION_C,
-)
+import numpy as np
+import logging
+from . import config
+from .utils import lag_column, compute_diff, filter_rows
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 if not logger.handlers:
     handler = logging.StreamHandler()
-    fmt = logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s")
-    handler.setFormatter(fmt)
+    handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s"))
     logger.addHandler(handler)
-logger.setLevel(logging.DEBUG)
 
 
-def _df_to_records_safe(df: pd.DataFrame) -> List[Dict[str, Any]]:
-    """Convert DataFrame to list of serializable dicts (convert numpy types)."""
-    if df is None or df.empty:
+def _extract_array(val):
+    """
+    Given a stream value, return a list/iterable of primitives.
+    Strava streams sometimes provide {'data': [...]}, or raw lists.
+    """
+    if val is None:
         return []
-    # Use pandas json-friendly conversion via to_dict then cast any non-serializable types
-    records = df.where(pd.notnull(df), None).to_dict(orient="records")
-    return records
+    if isinstance(val, dict) and 'data' in val:
+        return val['data'] or []
+    if isinstance(val, (list, tuple, pd.Series, np.ndarray)):
+        return list(val)
+    # scalar -> repeat? We treat as single-element array
+    return [val]
 
 
-def _safe_opt_cad_serializable(opt: Dict[str, Any]) -> Dict[str, Any]:
-    """Ensure optimal cadence structure is JSON-serializable."""
-    if not isinstance(opt, dict):
-        return {"optimal_cadence": None, "performance_score": None, "exertion_score": None, "details": []}
-    details = opt.get("details", [])
-    if isinstance(details, pd.DataFrame):
-        details = details.where(pd.notnull(details), None).to_dict(orient="records")
-    # ensure basic keys exist
-    return {
-        "optimal_cadence": opt.get("optimal_cadence"),
-        "performance_score": opt.get("performance_score"),
-        "exertion_score": opt.get("exertion_score"),
-        "details": details or [],
-    }
-
-
-def process_activity_stream(streams: dict) -> dict:
+def prepare_data(stream_data) -> pd.DataFrame:
     """
-    Robust wrapper for computing OptCad results from raw Strava streams.
-
-    Returns a JSON-serializable dict:
-      - segments: list of per-segment aggregated dicts (may be empty)
-      - optimal_cadence: dict with optimal cadence info (or None fields)
-      - message: human-readable status
+    Robust conversion of Strava stream payload into a DataFrame for processing.
+    Accepts either:
+      - dict of arrays (or dict-of-{'data': arrays}), or
+      - a pandas DataFrame (passes through with minimal normalization).
     """
-    logger.info("Starting process_activity_stream")
+    logger.info("Preparing data: extracting stream arrays")
 
-    # Build DataFrame from incoming streams dict (tolerant to missing keys)
-    df = pd.DataFrame({
-        "time": streams.get("time", []),
-        "cadence": streams.get("cadence", []),
-        "speed": streams.get("velocity_smooth", []),
-        "distance": streams.get("distance", []),
-        "altitude": streams.get("altitude", []),
-        "moving": streams.get("moving", []),
-    })
-
-    logger.debug("Initial stream lengths: " + ", ".join(
-        f"{k}={len(df[k])}" for k in df.columns if k in df
-    ))
-    logger.info(f"Initial rows (built DF): {len(df)}")
-
-    # 1) Prepare data
-    try:
-        df_prepared = prepare_data(df)
-    except Exception as e:
-        logger.exception("prepare_data raised an exception")
-        return {
-            "segments": [],
-            "optimal_cadence": {"optimal_cadence": None, "performance_score": None, "exertion_score": None, "details": []},
-            "message": f"prepare_data failed: {e}",
-        }
-
-    if df_prepared is None or df_prepared.empty:
-        msg = "Insufficient data after prepare_data (no moving rows or filtered out)."
-        logger.warning(msg)
-        return {
-            "segments": [],
-            "optimal_cadence": {"optimal_cadence": None, "performance_score": None, "exertion_score": None, "details": []},
-            "message": msg,
-        }
-
-    logger.info(f"Rows after prepare_data: {len(df_prepared)}")
-    logger.debug(f"Columns after prepare_data: {df_prepared.columns.tolist()}")
-
-    # 2) Calculate gradient (smoothing)
-    try:
-        df_grad = calculate_gradient(df_prepared, window=GRADIENT_WINDOW)
-    except Exception as e:
-        logger.exception("calculate_gradient raised an exception")
-        return {
-            "segments": [],
-            "optimal_cadence": {"optimal_cadence": None, "performance_score": None, "exertion_score": None, "details": []},
-            "message": f"calculate_gradient failed: {e}",
-        }
-
-    logger.info(f"Rows after calculate_gradient: {len(df_grad)}")
-    if "MA_gradient_raw" in df_grad.columns:
-        valid_grads = df_grad["MA_gradient_raw"].dropna()
-        logger.info(f"Gradient stats: count={len(valid_grads)}, min={valid_grads.min() if len(valid_grads) else None}, max={valid_grads.max() if len(valid_grads) else None}")
-
-    # 3) Segment ride
-    try:
-        df_seg = segment_ride(df_grad, time_limit=TIME_LIMIT_SEC, grad_limit=GRAD_LIMIT_PCT)
-    except Exception as e:
-        logger.exception("segment_ride raised an exception")
-        return {
-            "segments": [],
-            "optimal_cadence": {"optimal_cadence": None, "performance_score": None, "exertion_score": None, "details": []},
-            "message": f"segment_ride failed: {e}",
-        }
-
-    if df_seg is None:
-        msg = "segment_ride returned None"
-        logger.error(msg)
-        return {
-            "segments": [],
-            "optimal_cadence": {"optimal_cadence": None, "performance_score": None, "exertion_score": None, "details": []},
-            "message": msg,
-        }
-
-    logger.info(f"Rows after segmentation: {len(df_seg)}")
-    if "segment_id" in df_seg.columns:
-        n_segments = int(df_seg["segment_id"].nunique())
-        logger.info(f"Unique segments created: {n_segments}")
+    # If user passed an actual DataFrame already, use it
+    if isinstance(stream_data, pd.DataFrame):
+        df = stream_data.copy()
+        logger.info(f"Input is already DataFrame with {len(df)} rows")
     else:
-        logger.warning("segment_id column missing after segmentation")
-        n_segments = 0
+        # Normalize streams dict -> arrays
+        keys = ['time', 'cadence', 'velocity_smooth', 'distance', 'altitude', 'grade_smooth', 'latlng', 'moving']
+        arrays = {}
+        max_len = 0
+        for k in keys:
+            raw = stream_data.get(k, None)
+            arr = _extract_array(raw)
+            arrays[k] = arr
+            if len(arr) > max_len:
+                max_len = len(arr)
+        logger.debug(f"Detected stream lengths per key: { {k: len(arrays[k]) for k in arrays} }, max_len={max_len}")
 
-    if n_segments == 0:
-        msg = "No segments created (segment_id missing or zero unique segments)."
-        logger.warning(msg)
-        return {
-            "segments": [],
-            "optimal_cadence": {"optimal_cadence": None, "performance_score": None, "exertion_score": None, "details": []},
-            "message": msg,
-        }
+        # pad all arrays to max_len with None
+        for k, arr in arrays.items():
+            if len(arr) < max_len:
+                arrays[k] = arr + [None] * (max_len - len(arr))
 
-    # 4) Calculate cadence & elevation derived columns
-    try:
-        df_ce = calculate_cadence_elevation(df_seg)
-    except Exception as e:
-        logger.exception("calculate_cadence_elevation raised an exception")
-        return {
-            "segments": [],
-            "optimal_cadence": {"optimal_cadence": None, "performance_score": None, "exertion_score": None, "details": []},
-            "message": f"calculate_cadence_elevation failed: {e}",
-        }
+        # Build DataFrame with canonical column names used by pipeline (lowercase)
+        df = pd.DataFrame({
+            'time': arrays.get('time', [None] * max_len),
+            'cadence': arrays.get('cadence', [None] * max_len),
+            'velocity_smooth': arrays.get('velocity_smooth', [None] * max_len),
+            'distance': arrays.get('distance', [None] * max_len),
+            'altitude': arrays.get('altitude', [None] * max_len),
+            'grade_smooth': arrays.get('grade_smooth', [None] * max_len),
+            'latlng': arrays.get('latlng', [None] * max_len),
+            'moving': arrays.get('moving', [None] * max_len),
+        })
+        logger.info(f"Initial rows (after building DF): {len(df)}")
 
-    logger.info(f"Rows after cadence/elevation derivation: {len(df_ce)}")
-    if "cadence_nonzero" in df_ce.columns:
-        logger.info(f"cadence_nonzero count non-null: {df_ce['cadence_nonzero'].notnull().sum()}")
+    # Convert types safely
+    # Normalize 'moving' -> boolean (some entries might be 0/1/True/False/None)
+    def _to_bool(v):
+        if v is None:
+            return False
+        # If a list/tuple -> take truthiness (non-empty -> True). Streams shouldn't give lists here.
+        if isinstance(v, (list, tuple, np.ndarray, pd.Series)):
+            return bool(v)
+        # Allow strings like "True"/"true"
+        if isinstance(v, str):
+            return v.lower() in ("true", "1", "t", "yes", "y")
+        try:
+            return bool(v)
+        except Exception:
+            return False
 
-    # 5) Aggregate per segment
-    try:
-        agg_df = aggregate_segments(df_ce)
-    except Exception as e:
-        logger.exception("aggregate_segments raised an exception")
-        return {
-            "segments": [],
-            "optimal_cadence": {"optimal_cadence": None, "performance_score": None, "exertion_score": None, "details": []},
-            "message": f"aggregate_segments failed: {e}",
-        }
+    # Ensure numeric columns
+    for col in ['distance', 'altitude', 'cadence', 'velocity_smooth', 'time']:
+        if col not in df.columns:
+            df[col] = np.nan
 
-    logger.info(f"Segments aggregated: {len(agg_df)}")
-    logger.debug(f"Aggregated columns: {agg_df.columns.tolist()}")
+    # Coerce numeric columns
+    df['distance'] = pd.to_numeric(df['distance'], errors='coerce')
+    df['altitude'] = pd.to_numeric(df['altitude'], errors='coerce')
+    df['cadence'] = pd.to_numeric(df['cadence'], errors='coerce')
+    df['velocity_smooth'] = pd.to_numeric(df.get('velocity_smooth', pd.Series(dtype=float)), errors='coerce')
+    # time sometimes already numeric
+    df['time'] = pd.to_numeric(df['time'], errors='coerce')
 
-    if agg_df is None or agg_df.empty:
-        msg = "No aggregated segments (agg_df empty)."
-        logger.warning(msg)
-        return {
-            "segments": [],
-            "optimal_cadence": {"optimal_cadence": None, "performance_score": None, "exertion_score": None, "details": []},
-            "message": msg,
-        }
+    # Convert moving robustly
+    df['moving'] = df['moving'].apply(_to_bool)
 
-    # 6) Compute scores
-    try:
-        scored_df = compute_scores(agg_df, a=EXERTION_A, b=EXERTION_B, c=EXERTION_C)
-    except Exception as e:
-        logger.exception("compute_scores raised an exception")
-        return {
-            "segments": [],
-            "optimal_cadence": {"optimal_cadence": None, "performance_score": None, "exertion_score": None, "details": []},
-            "message": f"compute_scores failed: {e}",
-        }
+    # Log counts before any filtering
+    logger.info(f"Rows before filtering: {len(df)}")
+    logger.info(f"Counts by moving flag: {int(df['moving'].sum())} moving, {len(df) - int(df['moving'].sum())} not moving")
 
+    # 1) Filter moving rows
+    df = df[df['moving'].astype(bool)].copy()
+    logger.info(f"Remaining rows after filtering moving==True: {len(df)}")
+
+    # 2) Compute diffs (use utils.compute_diff)
+    logger.info("Computing distance_diff and altitude_diff")
+    # Ensure column names match the util usage
+    df['distance_diff'] = compute_diff(df, 'distance')
+    df['altitude_diff'] = compute_diff(df, 'altitude')
+
+    # 3) Filter tiny distances (keeps only meaningful moves)
+    prev_len = len(df)
+    df = df[df['distance_diff'] > 1].copy()
+    logger.info(f"Remaining rows after distance_diff > 1: {len(df)} (was {prev_len})")
+
+    return df
+
+
+def calculate_gradient(df: pd.DataFrame, window: int = config.GRADIENT_WINDOW) -> pd.DataFrame:
+    logger.info(f"Calculating gradient with window: {window}")
+    if df.empty:
+        logger.warning("calculate_gradient called with empty DataFrame")
+        df['gradient_raw'] = pd.Series(dtype=float)
+        df['MA_gradient_raw'] = pd.Series(dtype=float)
+        return df
+
+    df['gradient_raw'] = (df['altitude_diff'] / df['distance_diff']) * 100
+    # clamp absurd values
+    invalid_gradients = df[(df['gradient_raw'] > 30) | (df['gradient_raw'] < -30)].shape[0]
+    if invalid_gradients > 0:
+        logger.info(f"Setting {invalid_gradients} extreme gradients to NaN")
+    df.loc[(df['gradient_raw'] > 30) | (df['gradient_raw'] < -30), 'gradient_raw'] = np.nan
+
+    df['MA_gradient_raw'] = df['gradient_raw'].rolling(window=window, center=True, min_periods=1).mean()
+    df['MA_gradient_raw'] = df['MA_gradient_raw'].interpolate(method='linear', limit_direction='both')
+    logger.info("Gradient calculation complete")
+    return df
+
+
+def segment_ride(df: pd.DataFrame, time_limit: float = config.TIME_LIMIT_SEC,
+                 grad_limit: float = config.GRAD_LIMIT_PCT) -> pd.DataFrame:
+    logger.info(f"Segmenting ride with time_limit={time_limit} sec and grad_limit={grad_limit}%")
+    if df.empty:
+        logger.warning("segment_ride called with empty DataFrame")
+        df['segment_id'] = pd.Series(dtype=int)
+        df['segment_start'] = pd.Series(dtype=bool)
+        df['time_since_segment'] = pd.Series(dtype=float)
+        df['grad_baseline'] = pd.Series(dtype=float)
+        return df
+
+    segment_id = 0
+    time_since_segment = 0.0
+    grad_base = 0.0
+    last_time = None
+
+    segment_ids, segment_starts, time_since_segments, grad_bases = [], [], [], []
+
+    for idx, row in df.reset_index(drop=True).iterrows():
+        t = row.get('time', None)
+        grad = row.get('MA_gradient_raw', np.nan)
+
+        if last_time is None or pd.isna(t) or (isinstance(t, (int, float)) and t < last_time):
+            td = 0.0
+        else:
+            td = 0.0 if pd.isna(t) else (t - last_time)
+
+        if not pd.isna(t):
+            last_time = t
+
+        if idx == 0:
+            segment_id = 1
+            time_since_segment = 0.0
+            grad_base = 0.0 if pd.isna(grad) else grad
+            is_start = True
+        else:
+            time_since_segment += td
+            time_trigger = time_since_segment >= time_limit
+            grad_trigger = (not pd.isna(grad)) and (abs(grad - grad_base) >= grad_limit)
+
+            if time_trigger or grad_trigger:
+                segment_id += 1
+                time_since_segment = 0.0
+                if not pd.isna(grad):
+                    grad_base = grad
+                is_start = True
+            else:
+                is_start = False
+
+        segment_ids.append(segment_id)
+        segment_starts.append(bool(is_start))
+        time_since_segments.append(float(time_since_segment))
+        grad_bases.append(float(grad_base if not pd.isna(grad_base) else 0.0))
+
+        if idx % 1000 == 0:
+            logger.debug(f"Row {idx}: segment_id={segment_id}, time_since_segment={time_since_segment}, grad_base={grad_base}")
+
+    df = df.reset_index(drop=True)
+    df['segment_id'] = pd.Series(segment_ids, index=df.index)
+    df['segment_start'] = pd.Series(segment_starts, index=df.index)
+    df['time_since_segment'] = pd.Series(time_since_segments, index=df.index)
+    df['grad_baseline'] = pd.Series(grad_bases, index=df.index)
+
+    logger.info(f"Segmentation complete: total segments={int(df['segment_id'].nunique()) if 'segment_id' in df.columns else 0}")
+    return df
+
+
+def calculate_cadence_elevation(df: pd.DataFrame) -> pd.DataFrame:
+    logger.info("Calculating cadence and elevation gain")
+    if df.empty:
+        logger.warning("calculate_cadence_elevation called with empty DataFrame")
+        return df
+    df = df.copy()
+    df['cadence_nonzero'] = df['cadence'].apply(lambda x: x if (pd.notna(x) and x > 0) else float('nan'))
+    df['elev_gain'] = df['altitude_diff'].apply(lambda x: x if (pd.notna(x) and x > 0) else 0)
+    logger.info("Cadence and elevation calculation complete")
+    return df
+
+
+def aggregate_segments(df: pd.DataFrame) -> pd.DataFrame:
+    logger.info("Aggregating segments")
+    if 'segment_id' not in df.columns:
+        raise KeyError("'segment_id' missing in DataFrame; segmentation must provide it before aggregation.")
+    agg_df = df.groupby('segment_id').agg(
+        cadence_nonzero_mean=('cadence_nonzero', 'mean'),
+        speed_mean=('velocity_smooth' if 'velocity_smooth' in df.columns else 'speed', 'mean'),
+        elev_gain_mean=('elev_gain', 'mean'),
+        distance_sum=('distance_diff', 'sum'),
+        gradient_mean=('MA_gradient_raw', 'mean'),
+    ).reset_index()
+    logger.info(f"Aggregation complete: {len(agg_df)} segments")
+    return agg_df
+
+
+def compute_scores(df: pd.DataFrame, a=config.EXERTION_A, b=config.EXERTION_B, c=config.EXERTION_C) -> pd.DataFrame:
+    logger.info("Computing performance and exertion scores")
+    if df.empty:
+        logger.warning("compute_scores called with empty DataFrame")
+        return df
+    df = df.copy()
+    # Avoid divide-by-zero: replace zero speeds with small epsilon
+    df['speed_mean'] = df['speed_mean'].replace({0: np.nan})
+    df['Exertion_Score'] = ((df['elev_gain_mean'] * (df['gradient_mean'] ** a)).fillna(0) + (df['cadence_nonzero_mean'] ** b).fillna(0)) / (df['speed_mean'] ** c)
+    df['Performance_Score'] = df['speed_mean'] / df['Exertion_Score']
     logger.info("Score computation complete")
-    logger.debug(f"Score columns: {scored_df.columns.tolist()}")
+    return df
 
-    # 7) Optimal cadence
-    try:
-        opt_cad = optimal_cadence(scored_df)
-    except Exception as e:
-        logger.exception("optimal_cadence raised an exception")
-        opt_cad = {"optimal_cadence": None, "performance_score": None, "exertion_score": None, "details": []}
 
-    opt_cad_safe = _safe_opt_cad_serializable(opt_cad)
+def cadence_binning(df: pd.DataFrame, bin_size=config.BIN_SIZE) -> pd.DataFrame:
+    logger.info("Binning cadence values")
+    if df.empty:
+        return pd.DataFrame(columns=['cadence_bin', 'Performance_Score', 'mean_cadence'])
+    df = df.copy()
+    df['cadence_bin'] = (df['cadence_nonzero_mean'] // bin_size) * bin_size
+    bin_df = (
+        df.groupby('cadence_bin', as_index=False)
+        .agg({
+            'Performance_Score': 'mean',
+            'cadence_nonzero_mean': 'mean',
+        })
+        .rename(columns={'cadence_nonzero_mean': 'mean_cadence'})
+    )
+    logger.info("Cadence binning complete")
+    return bin_df
 
-    # Convert segment DataFrame to serializable list of dicts
-    segments = _df_to_records_safe(scored_df)
 
-    logger.info("process_activity_stream completed successfully")
-    return {
-        "segments": segments,
-        "optimal_cadence": opt_cad_safe,
-        "message": "Computation completed",
+def optimal_cadence(df: pd.DataFrame) -> dict:
+    logger.info("Computing optimal cadence from aggregated segments")
+    binned_df = cadence_binning(df)
+    if binned_df.empty:
+        logger.warning("No data available for optimal cadence computation")
+        return {"optimal_cadence": None, "performance_score": None, "exertion_score": None, "details": []}
+    best_idx = int(binned_df['Performance_Score'].idxmax())
+    best_bin = binned_df.iloc[best_idx]
+    result = {
+        "optimal_cadence": float(round(best_bin['cadence_bin'], 1)),
+        "performance_score": float(round(best_bin['Performance_Score'], 3)),
+        "exertion_score": None,
+        "details": binned_df.where(pd.notnull(binned_df), None).to_dict(orient='records'),
     }
+    logger.info(f"Optimal cadence found: {result['optimal_cadence']} rpm")
+    return result
+
