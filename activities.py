@@ -1,17 +1,10 @@
+# activities.py
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 import requests
 import logging
 from config import SESSIONS
-from compute.core import (
-    prepare_data,
-    calculate_gradient,
-    segment_ride,
-    calculate_cadence_elevation,
-    aggregate_segments,
-    compute_scores,
-    optimal_cadence
-)
+from compute.optcad_compute import process_activity_stream
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -48,12 +41,15 @@ def list_activities(session_id: str):
     
     activities = response.json()
     logger.info(f"Fetched {len(activities)} activities")
-    logger.debug(f"Activities data: {activities}")
     return JSONResponse(activities)
 
 
 @router.get("/compute")
 def compute_activity(session_id: str, activity_id: str):
+    """
+    Fetch streams for the activity from Strava, normalize streams, and
+    pass to the process_activity_stream wrapper which returns serializable dict.
+    """
     logger.info(f"Computing activity {activity_id} for session_id={session_id}")
     
     token_data = SESSIONS.get(session_id)
@@ -69,50 +65,37 @@ def compute_activity(session_id: str, activity_id: str):
     response = requests.get(
         url, 
         headers={"Authorization": f"Bearer {access_token}"}, 
-        params={"keys": stream_types,"key_by_type":"true","resolution":"high"}
+        params={"keys": stream_types, "key_by_type": "true", "resolution": "high"}
     )
     
     if response.status_code != 200:
         logger.error(f"Failed to fetch stream data: {response.status_code}, {response.text}")
         raise HTTPException(status_code=500, detail="Failed to fetch stream data")
     
-    stream_data = response.json()
+    stream_data_raw = response.json()
     logger.info("Stream data fetched successfully")
-    logger.debug(f"Stream data: {stream_data.keys()}")  # avoid printing huge raw data
-    
+    logger.debug(f"Raw stream keys: {list(stream_data_raw.keys())}")
+
+    # Normalize to dict-of-lists expected by compute.prepare_data
+    normalized = {}
+    lengths = {}
+    for k, v in stream_data_raw.items():
+        if isinstance(v, dict) and 'data' in v:
+            normalized[k] = v['data']
+        else:
+            normalized[k] = v
+        try:
+            lengths[k] = len(normalized[k]) if normalized[k] is not None else 0
+        except Exception:
+            lengths[k] = "unknown"
+
+    logger.debug(f"Detected stream lengths per key: {lengths}, max_len={max([l for l in lengths.values() if isinstance(l, int)], default=0)}")
+
     try:
-        logger.info("Preparing data")
-        data = prepare_data(stream_data)
-
-        logger.info("Calculating gradient")
-        grad = calculate_gradient(data)
-
-        logger.info("Segmenting ride")
-        segments_idx = segment_ride(data)
-
-        logger.info("Calculating cadence and elevation")
-        segments = calculate_cadence_elevation(data)
-        
-        logger.info("Aggregating segments")
-        segments = aggregate_segments(segments)
-
-        logger.info("Computing scores")
-        segments = compute_scores(segments)
-
-        logger.info("Determining optimal cadence")
-        opt_cad = optimal_cadence(segments)
-
-        logger.info(f"Computation complete: {len(segments)} segments, optimal cadence={opt_cad}")
-
+        # Use the wrapper that returns plain python objects
+        result = process_activity_stream(normalized)
+        logger.info(f"Computation finished: segments={len(result.get('segments', []))}, optimal={result.get('optimal_cadence')}")
+        return JSONResponse(result)
     except Exception as e:
-        logger.exception(f"Error during computation: {e}")
+        logger.exception(f"Error during compute pipeline: {e}")
         raise HTTPException(status_code=500, detail=str(e))
-    
-        # convert pandas DataFrame to list-of-dicts (if it's a DataFrame)
-    if isinstance(segments, pd.DataFrame):
-        segments_out = segments.to_dict(orient='records')
-    else:
-        segments_out = segments
-
-    return JSONResponse({"segments": segments_out, "optimal_cadence": opt_cad})
-
