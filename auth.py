@@ -12,7 +12,7 @@ SESSIONS: Dict[str, Dict] = {}
 
 STRAVA_CLIENT_ID = os.environ.get("STRAVA_CLIENT_ID")
 STRAVA_CLIENT_SECRET = os.environ.get("STRAVA_CLIENT_SECRET")
-STRAVA_REDIRECT_URI = os.environ.get("STRAVA_REDIRECT_URI", "https://n1jl0091.github.io/optcad_frontend/activities.html")
+STRAVA_REDIRECT_URI = os.environ.get("STRAVA_REDIRECT_URI", "https://optcadbackend-production.up.railway.app/auth/callback")
 
 @router.get("/auth")
 def auth_redirect():
