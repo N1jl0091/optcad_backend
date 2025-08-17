@@ -7,7 +7,7 @@ from .core import (
     compute_scores,
     optimal_cadence
 )
-from .config import TIME_LIMIT_SEC, GRAD_LIMIT_PCT, GRADIENT_WINDOW, CADENCE_MIN, BIN_SIZE, EXERTION_A, EXERTION_B, EXERTION_C
+from .config import TIME_LIMIT_SEC, GRAD_LIMIT_PCT, GRADIENT_WINDOW, BIN_SIZE, EXERTION_A, EXERTION_B, EXERTION_C
 import pandas as pd
 
 def process_activity_stream(streams: dict) -> dict:
@@ -48,8 +48,12 @@ def process_activity_stream(streams: dict) -> dict:
     # 7. Compute optimal cadence
     opt_cadence = optimal_cadence(agg_df)
 
-    # Convert segment DataFrame to list of dicts
+    # Convert all DataFrames to JSON-serializable lists of dicts
     segments = agg_df.to_dict(orient='records')
+
+    # If optimal_cadence includes DataFrames internally, convert them too
+    if isinstance(opt_cadence.get("details"), pd.DataFrame):
+        opt_cadence["details"] = opt_cadence["details"].to_dict(orient='records')
 
     return {
         "segments": segments,
