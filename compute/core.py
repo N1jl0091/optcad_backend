@@ -255,32 +255,83 @@ def compute_scores(df: pd.DataFrame, a=config.EXERTION_A, b=config.EXERTION_B, c
 
 
 def cadence_binning(df: pd.DataFrame, bin_size=config.BIN_SIZE) -> pd.DataFrame:
+    """
+    Create cadence bins from aggregated segment rows.
+
+    Returns a DataFrame with:
+      - cadence_bin: bin floor (e.g. 60.0)
+      - Performance_Score: mean performance score inside the bin
+      - mean_cadence: mean cadence inside the bin
+      - count: how many segments contributed to this bin
+    """
     logger.info("Binning cadence values")
     if df.empty:
-        return pd.DataFrame(columns=["cadence_bin", "Performance_Score", "mean_cadence"])
+        logger.info("cadence_binning received empty df")
+        return pd.DataFrame(columns=["cadence_bin", "Performance_Score", "mean_cadence", "count"])
+
     df = df.copy()
-    df["cadence_bin"] = (df["cadence_nonzero_mean"] // bin_size) * bin_size
+    # floor to nearest bin
+    df['cadence_bin'] = (df['cadence_nonzero_mean'] // bin_size) * bin_size
+
     bin_df = (
-        df.groupby("cadence_bin", as_index=False)
-        .agg({"Performance_Score": "mean", "cadence_nonzero_mean": "mean"})
-        .rename(columns={"cadence_nonzero_mean": "mean_cadence"})
+        df.groupby('cadence_bin', as_index=False)
+          .agg(
+              Performance_Score=('Performance_Score', 'mean'),
+              mean_cadence=('cadence_nonzero_mean', 'mean'),
+              count=('cadence_nonzero_mean', 'size')
+          )
+          .sort_values('cadence_bin')
     )
+
+    # Make sure types are native python floats/ints for JSON safety later
+    bin_df['Performance_Score'] = bin_df['Performance_Score'].astype(float)
+    bin_df['mean_cadence'] = bin_df['mean_cadence'].astype(float)
+    bin_df['count'] = bin_df['count'].astype(int)
+
+    logger.debug(f"Cadence bins:\n{bin_df.to_dict(orient='records')}")
     logger.info("Cadence binning complete")
     return bin_df
 
 
 def optimal_cadence(df: pd.DataFrame) -> dict:
+    """
+    Compute the optimal cadence. Apply sensible filters:
+      - bins must have mean_cadence >= config.CADENCE_MIN (if set)
+      - bins must have at least config.MIN_BIN_COUNT segments (optional; default 1)
+    If no bins survive filtering, fall back to the highest scoring bin with a warning.
+    """
     logger.info("Computing optimal cadence from aggregated segments")
+
     binned_df = cadence_binning(df)
+
     if binned_df.empty:
-        logger.warning("No data available for optimal cadence computation")
-        return {"optimal_cadence": None, "performance_score": None, "exertion_score": None, "details": []}
-    best_bin = binned_df.loc[binned_df["Performance_Score"].idxmax()]
+        logger.warning("No binned data available for optimal cadence computation")
+        return {
+            "optimal_cadence": None,
+            "performance_score": None,
+            "exertion_score": None,
+            "details": []
+        }
+
+    # Config-driven filters (safe defaults)
+    min_cad = getattr(config, "CADENCE_MIN", 0) or 0
+    min_count = getattr(config, "MIN_BIN_COUNT", 1) or 1
+
+    logger.info(f"Filtering bins: mean_cadence >= {min_cad}, count >= {min_count}")
+    filtered = binned_df[(binned_df['mean_cadence'] >= float(min_cad)) & (binned_df['count'] >= int(min_count))]
+
+    if filtered.empty:
+        logger.warning("No cadence bins passed filters; falling back to unfiltered best bin")
+        chosen_row = binned_df.loc[binned_df['Performance_Score'].idxmax()]
+    else:
+        chosen_row = filtered.loc[filtered['Performance_Score'].idxmax()]
+
     result = {
-        "optimal_cadence": float(best_bin["cadence_bin"]),
-        "performance_score": float(best_bin["Performance_Score"]),
+        "optimal_cadence": float(chosen_row['mean_cadence']),
+        "performance_score": float(chosen_row['Performance_Score']),
         "exertion_score": None,
-        "details": binned_df.to_dict(orient="records"),
+        "details": binned_df.to_dict(orient="records")
     }
-    logger.info(f"Optimal cadence found: {result['optimal_cadence']} rpm")
+
+    logger.info(f"Optimal cadence selected: {result['optimal_cadence']} rpm (perf={result['performance_score']}, count_in_bin={int(chosen_row['count'])})")
     return result
