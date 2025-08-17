@@ -6,7 +6,7 @@ from .utils import lag_column, compute_diff, filter_rows
 
 # Configure logging
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)  # Set to INFO or DEBUG as needed
+logger.setLevel(logging.DEBUG)  # Change to INFO for less verbosity
 handler = logging.StreamHandler()
 formatter = logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s")
 handler.setFormatter(formatter)
@@ -25,7 +25,7 @@ def prepare_data(stream_data: dict) -> pd.DataFrame:
     required_columns = ['time', 'distance', 'altitude', 'moving', 'cadence', 'speed']
     for col in required_columns:
         if col not in df.columns:
-            df[col] = np.nan  # Fill missing columns with NaN
+            df[col] = np.nan
 
     # Convert types
     df['moving'] = df['moving'].astype(bool)
@@ -40,9 +40,8 @@ def prepare_data(stream_data: dict) -> pd.DataFrame:
     logger.info(f"Remaining rows after filtering: {len(df)}")
 
     # Compute differences
-    logger.info("Computing distance differences")
+    logger.info("Computing distance and altitude differences")
     df['distance_diff'] = compute_diff(df, 'distance')
-    logger.info("Computing altitude differences")
     df['altitude_diff'] = compute_diff(df, 'altitude')
 
     # Filter out small distance differences
@@ -52,10 +51,10 @@ def prepare_data(stream_data: dict) -> pd.DataFrame:
     return df
 
 
-
 def calculate_gradient(df: pd.DataFrame, window: int = config.GRADIENT_WINDOW) -> pd.DataFrame:
     logger.info(f"Calculating gradient with window: {window}")
     df['gradient_raw'] = (df['altitude_diff'] / df['distance_diff']) * 100
+
     invalid_gradients = df[(df['gradient_raw'] > 30) | (df['gradient_raw'] < -30)].shape[0]
     if invalid_gradients > 0:
         logger.info(f"Setting {invalid_gradients} extreme gradients to NaN")
@@ -67,7 +66,8 @@ def calculate_gradient(df: pd.DataFrame, window: int = config.GRADIENT_WINDOW) -
     return df
 
 
-def segment_ride(df: pd.DataFrame, time_limit: float = config.TIME_LIMIT_SEC, grad_limit: float = config.GRAD_LIMIT_PCT) -> pd.DataFrame:
+def segment_ride(df: pd.DataFrame, time_limit: float = config.TIME_LIMIT_SEC,
+                 grad_limit: float = config.GRAD_LIMIT_PCT) -> pd.DataFrame:
     logger.info(f"Segmenting ride with time_limit={time_limit} sec and grad_limit={grad_limit}%")
 
     segment_id = 0
@@ -139,7 +139,8 @@ def aggregate_segments(df: pd.DataFrame) -> pd.DataFrame:
     return agg_df
 
 
-def compute_scores(df: pd.DataFrame, a=config.EXERTION_A, b=config.EXERTION_B, c=config.EXERTION_C) -> pd.DataFrame:
+def compute_scores(df: pd.DataFrame, a=config.EXERTION_A, b=config.EXERTION_B,
+                   c=config.EXERTION_C) -> pd.DataFrame:
     logger.info("Computing performance and exertion scores")
     df = df.copy()
     df['Exertion_Score'] = (
@@ -165,6 +166,7 @@ def cadence_binning(df: pd.DataFrame, bin_size=config.BIN_SIZE) -> pd.DataFrame:
     logger.info("Cadence binning complete")
     return bin_df
 
+
 def optimal_cadence(df: pd.DataFrame) -> dict:
     """
     Compute the optimal cadence given an aggregated segments DataFrame.
@@ -189,7 +191,7 @@ def optimal_cadence(df: pd.DataFrame) -> dict:
     result = {
         "optimal_cadence": round(best_bin['cadence_bin'], 1),
         "performance_score": round(best_bin['Performance_Score'], 3),
-        "exertion_score": None,  # not in bin_df, so left out or we can add if needed
+        "exertion_score": None,
         "details": binned_df.to_dict(orient="records")
     }
 
