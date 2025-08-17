@@ -108,4 +108,11 @@ def compute_activity(session_id: str, activity_id: str):
         logger.exception(f"Error during computation: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     
-    return JSONResponse({"segments": segments, "optimal_cadence": opt_cad})
+        # convert pandas DataFrame to list-of-dicts (if it's a DataFrame)
+    if isinstance(segments, pd.DataFrame):
+        segments_out = segments.to_dict(orient='records')
+    else:
+        segments_out = segments
+
+    return JSONResponse({"segments": segments_out, "optimal_cadence": opt_cad})
+
