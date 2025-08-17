@@ -18,6 +18,9 @@ def prepare_data(stream_data: dict) -> pd.DataFrame:
     Convert stream data from Strava API into a proper DataFrame and prepare it for computation.
     Filters out non-moving rows, computes diffs, and ensures numeric types.
     """
+    print("STREAM DATA KEYS:", list(stream_data.keys()))
+    print("MOVING RAW:", stream_data.get('moving'))
+
     logger.info("Preparing data: converting stream_data to DataFrame")
     df = pd.DataFrame(stream_data)
 
@@ -35,9 +38,9 @@ def prepare_data(stream_data: dict) -> pd.DataFrame:
     df['speed'] = pd.to_numeric(df['speed'], errors='coerce')
 
     # Filter moving rows
-    logger.info("Filtering moving rows")
-    df = df[df['moving']].copy()
-    logger.info(f"Remaining rows after filtering: {len(df)}")
+    #logger.info("Filtering moving rows")
+    #df = df[df['moving']].copy()
+    #logger.info(f"Remaining rows after filtering: {len(df)}")
 
     # Compute differences
     logger.info("Computing distance and altitude differences")
