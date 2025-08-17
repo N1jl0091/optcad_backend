@@ -226,18 +226,45 @@ def calculate_cadence_elevation(df: pd.DataFrame) -> pd.DataFrame:
 
 def aggregate_segments(df: pd.DataFrame) -> pd.DataFrame:
     logger.info("Aggregating segments")
+
     if "segment_id" not in df.columns:
         logger.error("aggregate_segments called but 'segment_id' missing from DataFrame")
         return pd.DataFrame()
-    agg_df = df.groupby("segment_id").agg(
-        cadence_nonzero_mean=("cadence_nonzero", "mean"),
-        speed_mean=("speed", "mean"),
-        elev_gain_mean=("elev_gain", "mean"),
-        distance_sum=("distance_diff", "sum"),
-        gradient_mean=("MA_gradient_raw", "mean"),
-    ).reset_index()
-    logger.info(f"Aggregation complete: {len(agg_df)} segments")
+
+    # Perform aggregation
+    agg_df = (
+        df.groupby("segment_id")
+          .agg(
+              cadence_nonzero_mean=("cadence_nonzero", "mean"),
+              speed_mean=("speed", "mean"),
+              elev_gain_mean=("elev_gain", "mean"),
+              distance_sum=("distance_diff", "sum"),
+              gradient_mean=("MA_gradient_raw", "mean"),
+          )
+          .reset_index()
+    )
+
+    logger.info(f"Aggregation complete: {len(agg_df)} segments (pre-filter)")
+
+    # Filter out downhill segments: require mean(MA_gradient_raw) >= 0
+    before_filter = len(agg_df)
+    agg_df = agg_df[agg_df["gradient_mean"].fillna(0) >= 0].copy()
+    after_gradient_filter = len(agg_df)
+    logger.info(f"Filtered downhill segments: {before_filter - after_gradient_filter} removed, {after_gradient_filter} remain")
+
+    # Optional cadence minimum filter (if defined in config)
+    cad_min = getattr(config, "CADENCE_MIN", None)
+    if cad_min is not None:
+        before_cad = len(agg_df)
+        try:
+            agg_df = agg_df[agg_df["cadence_nonzero_mean"].fillna(0) >= float(cad_min)].copy()
+            logger.info(f"Applied cadence_min filter >= {cad_min}: {before_cad - len(agg_df)} removed, {len(agg_df)} remain")
+        except Exception as e:
+            logger.exception(f"Failed applying CADENCE_MIN filter ({cad_min}): {e}")
+
+    logger.info(f"Aggregation finished: {len(agg_df)} segments (post-filter)")
     return agg_df
+
 
 
 def compute_scores(df: pd.DataFrame, a=config.EXERTION_A, b=config.EXERTION_B, c=config.EXERTION_C) -> pd.DataFrame:

@@ -1,88 +1,162 @@
-# activities.py — replace /compute endpoint with this implementation
-import traceback
+# activities.py
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 import requests
 import logging
 from config import SESSIONS
 from compute.optcad_compute import process_activity_stream
-import pandas as pd
 
+# Configure logging
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+handler = logging.StreamHandler()
+formatter = logging.Formatter("[%(asctime)s] %(levelname)s: %(message)s")
+handler.setFormatter(formatter)
+# avoid duplicate handlers in reload environments
+if not logger.handlers:
+    logger.addHandler(handler)
+else:
+    logger.handlers = [handler]
+
 router = APIRouter()
 
-@router.get("/compute")
-def compute_activity(session_id: str, activity_id: str):
-    logger.info(f"Computing activity {activity_id} for session_id={session_id}")
+
+@router.get("/activities")
+def list_activities(session_id: str):
+    """Return a compact list of recent 'Ride' activities for the authenticated athlete."""
+    logger.info("list_activities called")
+    logger.debug("session_id=%s", session_id)
 
     token_data = SESSIONS.get(session_id)
     if not token_data:
-        logger.warning(f"Invalid session ID: {session_id}")
+        logger.warning("Invalid session ID provided to /activities: %s", session_id)
         raise HTTPException(status_code=401, detail="Invalid session ID")
 
     access_token = token_data.get("access_token")
     if not access_token:
-        logger.warning("Session missing access_token")
-        raise HTTPException(status_code=401, detail="Invalid session (no token)")
+        logger.error("Session exists but access_token missing for session: %s", session_id)
+        raise HTTPException(status_code=401, detail="Invalid session data")
+
+    url = "https://www.strava.com/api/v3/athlete/activities"
+    logger.debug("Fetching activities from Strava API: %s", url)
+
+    try:
+        response = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {access_token}"},
+            params={"per_page": 50},
+            timeout=15,
+        )
+    except Exception as e:
+        logger.exception("HTTP request to Strava failed")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch activities: {e}")
+
+    if response.status_code != 200:
+        logger.error("Failed to fetch activities: %s %s", response.status_code, response.text)
+        raise HTTPException(status_code=500, detail="Failed to fetch activities from Strava")
+
+    activities = response.json()
+    logger.info("Fetched %d activities from Strava", len(activities))
+
+    # Keep compatibility with previous frontend: return only rides with compact fields
+    rides = [
+        {
+            "id": a.get("id"),
+            "name": a.get("name"),
+            "distance": a.get("distance"),
+            "start_date": a.get("start_date"),
+            "type": a.get("type"),
+        }
+        for a in activities
+        if a.get("type") == "Ride"
+    ][:30]
+
+    logger.info("Returning %d bike rides", len(rides))
+    return JSONResponse(rides)
+
+
+@router.get("/compute")
+def compute_activity(session_id: str, activity_id: str):
+    """
+    Fetch streams for the activity from Strava, normalize them into dict-of-lists,
+    and pass to process_activity_stream which returns a JSON-serializable dict.
+    """
+    logger.info("compute_activity called")
+    logger.debug("session_id=%s activity_id=%s", session_id, activity_id)
+
+    token_data = SESSIONS.get(session_id)
+    if not token_data:
+        logger.warning("Invalid session ID provided to /compute: %s", session_id)
+        raise HTTPException(status_code=401, detail="Invalid session ID")
+
+    access_token = token_data.get("access_token")
+    if not access_token:
+        logger.error("Session exists but access_token missing for session: %s", session_id)
+        raise HTTPException(status_code=401, detail="Invalid session data")
 
     url = f"https://www.strava.com/api/v3/activities/{activity_id}/streams"
-    stream_types = ",".join(["time","cadence","velocity_smooth","distance","altitude","grade_smooth","latlng","moving"])
+    stream_types = ",".join([
+        "time", "cadence", "velocity_smooth", "distance",
+        "altitude", "grade_smooth", "latlng", "moving"
+    ])
 
-    logger.debug(f"Fetching streams from Strava API: {url} for types {stream_types}")
+    logger.debug("Fetching streams from Strava API: %s types=%s", url, stream_types)
     try:
         response = requests.get(
             url,
             headers={"Authorization": f"Bearer {access_token}"},
             params={"keys": stream_types, "key_by_type": "true", "resolution": "high"},
-            timeout=15
+            timeout=20,
         )
     except Exception as e:
-        logger.exception("HTTP error when fetching streams")
-        raise HTTPException(status_code=502, detail="Failed to fetch streams from Strava")
+        logger.exception("HTTP request to Strava streams endpoint failed")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch stream data: {e}")
 
     if response.status_code != 200:
-        logger.error(f"Failed to fetch stream data: {response.status_code} {response.text}")
-        raise HTTPException(status_code=500, detail="Failed to fetch stream data")
+        logger.error("Failed to fetch stream data: %s %s", response.status_code, response.text)
+        raise HTTPException(status_code=500, detail="Failed to fetch stream data from Strava")
 
-    stream_raw = response.json()
+    stream_data_raw = response.json()
     logger.info("Stream data fetched successfully")
-    logger.debug(f"Raw stream keys: {list(stream_raw.keys())}")
+    logger.debug("Raw stream keys: %s", list(stream_data_raw.keys()))
 
-    # normalize to dict-of-lists expected by compute
+    # Normalize to dict-of-lists expected by compute.prepare_data / process_activity_stream
     normalized = {}
     lengths = {}
-    for k, v in stream_raw.items():
-        if isinstance(v, dict) and "data" in v:
-            normalized[k] = v["data"]
+    for k, v in stream_data_raw.items():
+        if isinstance(v, dict) and 'data' in v:
+            normalized[k] = v.get('data') or []
         else:
-            normalized[k] = v
+            normalized[k] = v or []
         try:
-            lengths[k] = len(normalized[k]) if normalized[k] is not None else 0
+            lengths[k] = len(normalized[k])
         except Exception:
             lengths[k] = "unknown"
-    logger.debug(f"Detected stream lengths per key: {lengths}, max_len={max([l for l in lengths.values() if isinstance(l, int)], default=0)}")
 
+    max_len = max([l for l in lengths.values() if isinstance(l, int)], default=0)
+    logger.debug("Detected stream lengths per key: %s, max_len=%s", lengths, max_len)
+
+    # Defensive: if no time/distance data present, return helpful error
+    if max_len == 0:
+        logger.error("No stream data arrays found for activity %s", activity_id)
+        raise HTTPException(status_code=500, detail="No stream data available for activity")
+
+    # Ensure all expected keys exist in normalized dict (fill with empty lists)
+    expected_keys = ["time", "cadence", "velocity_smooth", "distance", "altitude", "grade_smooth", "latlng", "moving"]
+    for key in expected_keys:
+        if key not in normalized:
+            normalized[key] = []
+
+    # Call the compute wrapper (should return JSON-serializable python types)
     try:
-        # call the wrapper that returns plain python objects
         result = process_activity_stream(normalized)
     except Exception as e:
-        # Print full traceback — crucial for debugging hidden threadpool exceptions
-        logger.error("Exception in process_activity_stream; full traceback below")
-        logger.error(traceback.format_exc())
-        # Also raise as HTTPException so frontend gets a controlled error
-        raise HTTPException(status_code=500, detail="Internal processing error")
+        logger.exception("Error running process_activity_stream for activity %s", activity_id)
+        raise HTTPException(status_code=500, detail=f"Computation failed: {e}")
 
-    # Defensive serialization: convert any pandas DataFrame inside `result` to plain dicts
-    def _make_serializable(obj):
-        if isinstance(obj, pd.DataFrame):
-            return obj.to_dict(orient="records")
-        if isinstance(obj, dict):
-            return {k: _make_serializable(v) for k, v in obj.items()}
-        if isinstance(obj, list):
-            return [_make_serializable(item) for item in obj]
-        return obj
+    # result expected shape: {"segments": [...], "optimal_cadence": {...}, "message": "..."}
+    seg_count = len(result.get("segments", [])) if isinstance(result.get("segments"), list) else "unknown"
+    opt = result.get("optimal_cadence")
+    logger.info("Computation finished: segments=%s, optimal=%s", seg_count, opt)
 
-    safe_result = _make_serializable(result)
-
-    logger.info(f"Computation finished: segments={len(safe_result.get('segments', [])) if isinstance(safe_result.get('segments'), list) else 'unknown'}, optimal={safe_result.get('optimal_cadence')}")
-    return JSONResponse(safe_result)
+    return JSONResponse(result)
