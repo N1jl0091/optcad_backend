@@ -8,6 +8,17 @@ from streams import router as streams_router  # ✅ correct
 
 app = FastAPI()
 
+from fastapi import Request
+import traceback
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger = logging.getLogger("uvicorn.error")
+    logger.error("Unhandled exception occurred: %s", exc)
+    logger.error(traceback.format_exc())
+    return JSONResponse({"detail": "Internal server error"}, status_code=500)
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://n1jl0091.github.io"],
