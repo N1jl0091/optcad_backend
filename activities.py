@@ -46,8 +46,11 @@ def list_activities(session_id: str):
         logger.error(f"Failed to fetch activities: {response.status_code}, {response.text}")
         raise HTTPException(status_code=500, detail="Failed to fetch activities")
     
-    logger.info(f"Fetched {len(response.json())} activities")
-    return JSONResponse(response.json())
+    activities = response.json()
+    logger.info(f"Fetched {len(activities)} activities")
+    logger.debug(f"Activities data: {activities}")
+    return JSONResponse(activities)
+
 
 @router.get("/compute")
 def compute_activity(session_id: str, activity_id: str):
@@ -75,6 +78,7 @@ def compute_activity(session_id: str, activity_id: str):
     
     stream_data = response.json()
     logger.info("Stream data fetched successfully")
+    logger.debug(f"Stream data: {stream_data.keys()}")  # avoid printing huge raw data
     
     try:
         logger.info("Preparing data")
