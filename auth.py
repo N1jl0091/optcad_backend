@@ -12,7 +12,13 @@ SESSIONS: Dict[str, Dict] = {}
 
 STRAVA_CLIENT_ID = os.environ.get("STRAVA_CLIENT_ID")
 STRAVA_CLIENT_SECRET = os.environ.get("STRAVA_CLIENT_SECRET")
-STRAVA_REDIRECT_URI = os.environ.get("STRAVA_REDIRECT_URI", "https://n1jl0091.github.io/optcad_frontend/")
+STRAVA_REDIRECT_URI = os.environ.get(
+    "STRAVA_REDIRECT_URI",
+    "https://optcadbackend-production.up.railway.app/auth/callback"
+)
+
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://n1jl0091.github.io/optcad_frontend/activities.html")
+
 
 @router.get("/auth")
 def auth_redirect():
@@ -57,5 +63,5 @@ def auth_callback(code: str):
         "expires_at": token_data.get("expires_at")
     }
     
-    # Redirect to frontend with session_id in query string
-    return RedirectResponse(f"{STRAVA_REDIRECT_URI}?session_id={session_id}")
+  # Later in auth_callback:
+	return RedirectResponse(f"{FRONTEND_URL}?session_id={session_id}")
