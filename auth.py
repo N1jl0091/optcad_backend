@@ -4,6 +4,7 @@ from fastapi.responses import RedirectResponse
 import requests
 from typing import Dict
 import os
+import uuid
 
 router = APIRouter()
 
@@ -17,7 +18,10 @@ STRAVA_REDIRECT_URI = os.environ.get(
     "https://optcadbackend-production.up.railway.app/auth/callback"
 )
 
-FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://n1jl0091.github.io/optcad_frontend/activities.html")
+FRONTEND_URL = os.environ.get(
+    "FRONTEND_URL",
+    "https://n1jl0091.github.io/optcad_frontend/activities.html"
+)
 
 
 @router.get("/auth")
@@ -35,6 +39,7 @@ def auth_redirect():
         f"approval_prompt=auto"
     )
     return RedirectResponse(url)
+
 
 @router.get("/auth/callback")
 def auth_callback(code: str):
@@ -54,8 +59,8 @@ def auth_callback(code: str):
         raise HTTPException(status_code=500, detail="Failed to get access token")
     
     token_data = resp.json()
-    # Generate session ID (simple example)
-    import uuid
+    
+    # Generate session ID
     session_id = str(uuid.uuid4())
     SESSIONS[session_id] = {
         "access_token": token_data["access_token"],
@@ -63,5 +68,5 @@ def auth_callback(code: str):
         "expires_at": token_data.get("expires_at")
     }
     
-  # Later in auth_callback:
-	return RedirectResponse(f"{FRONTEND_URL}?session_id={session_id}")
+    # Redirect to frontend with session_id
+    return RedirectResponse(f"{FRONTEND_URL}?session_id={session_id}")
