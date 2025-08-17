@@ -22,10 +22,10 @@ router = APIRouter()
 
 
 @router.get("/activities")
-def list_activities(session_id: str):
-    """Return a compact list of recent 'Ride' activities for the authenticated athlete."""
+def list_activities(session_id: str, activity_name: str | None = None):
+    """Return a compact list of recent 'Ride' activities or search by exact activity name."""
     logger.info("list_activities called")
-    logger.debug("session_id=%s", session_id)
+    logger.debug("session_id=%s activity_name=%s", session_id, activity_name)
 
     token_data = SESSIONS.get(session_id)
     if not token_data:
@@ -40,6 +40,58 @@ def list_activities(session_id: str):
     url = "https://www.strava.com/api/v3/athlete/activities"
     logger.debug("Fetching activities from Strava API: %s", url)
 
+    # If user supplied activity_name, search pages until found (avoid missing older activities)
+    if activity_name:
+        logger.info("Searching for activity by exact name: %s", activity_name)
+        per_page = 100
+        max_pages = 5  # search up to 500 activities (tunable)
+        found = None
+        for page in range(1, max_pages + 1):
+            try:
+                response = requests.get(
+                    url,
+                    headers={"Authorization": f"Bearer {access_token}"},
+                    params={"per_page": per_page, "page": page},
+                    timeout=15,
+                )
+            except Exception as e:
+                logger.exception("HTTP request to Strava failed while searching")
+                raise HTTPException(status_code=500, detail=f"Failed to fetch activities: {e}")
+
+            if response.status_code != 200:
+                logger.error("Failed to fetch activities (search): %s %s", response.status_code, response.text)
+                raise HTTPException(status_code=500, detail="Failed to fetch activities from Strava")
+
+            activities = response.json()
+            logger.debug("Fetched page %s with %d activities", page, len(activities))
+
+            # Look for an exact name match (case sensitive). Change to .lower() if you want case-insensitive.
+            for a in activities:
+                if a.get("type") == "Ride" and a.get("name") == activity_name:
+                    found = a
+                    break
+            if found:
+                break
+
+            # stop early if fewer than per_page items returned (no more pages)
+            if len(activities) < per_page:
+                break
+
+        if found:
+            rides = [{
+                "id": found.get("id"),
+                "name": found.get("name"),
+                "distance": found.get("distance"),
+                "start_date": found.get("start_date"),
+                "type": found.get("type"),
+            }]
+            logger.info("Found activity by name; returning 1 ride")
+            return JSONResponse(rides)
+        else:
+            logger.info("Activity not found by name: %s", activity_name)
+            return JSONResponse([])  # frontend already expects array
+
+    # --- fallback: list recent rides as before ---
     try:
         response = requests.get(
             url,
@@ -58,7 +110,6 @@ def list_activities(session_id: str):
     activities = response.json()
     logger.info("Fetched %d activities from Strava", len(activities))
 
-    # Keep compatibility with previous frontend: return only rides with compact fields
     rides = [
         {
             "id": a.get("id"),
@@ -73,6 +124,7 @@ def list_activities(session_id: str):
 
     logger.info("Returning %d bike rides", len(rides))
     return JSONResponse(rides)
+
 
 
 @router.get("/compute")
