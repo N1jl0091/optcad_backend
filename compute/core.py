@@ -140,3 +140,33 @@ def cadence_binning(df: pd.DataFrame, bin_size=config.BIN_SIZE) -> pd.DataFrame:
     logger.info("Cadence binning complete")
     return bin_df
 
+def optimal_cadence(df: pd.DataFrame) -> dict:
+    """
+    Compute the optimal cadence given an aggregated segments DataFrame.
+    """
+    logger.info("Computing optimal cadence from aggregated segments")
+
+    # Bin cadence
+    binned_df = cadence_binning(df)
+
+    if binned_df.empty:
+        logger.warning("No data available for optimal cadence computation")
+        return {
+            "optimal_cadence": None,
+            "performance_score": None,
+            "exertion_score": None,
+            "details": []
+        }
+
+    # Pick cadence bin with highest performance score
+    best_bin = binned_df.loc[binned_df['Performance_Score'].idxmax()]
+
+    result = {
+        "optimal_cadence": round(best_bin['cadence_bin'], 1),
+        "performance_score": round(best_bin['Performance_Score'], 3),
+        "exertion_score": None,  # not in bin_df, so left out or we can add if needed
+        "details": binned_df.to_dict(orient="records")
+    }
+
+    logger.info(f"Optimal cadence found: {result['optimal_cadence']} rpm")
+    return result
