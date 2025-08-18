@@ -5,6 +5,9 @@ import requests
 import logging
 from config import SESSIONS
 from compute.optcad_compute import process_activity_stream
+from fastapi.responses import Response
+import io
+import csv
 
 # Configure logging
 logger = logging.getLogger(__name__)
@@ -212,3 +215,85 @@ def compute_activity(session_id: str, activity_id: str):
     logger.info("Computation finished: segments=%s, optimal=%s", seg_count, opt)
 
     return JSONResponse(result)
+    
+@router.get("/activity-stream")
+def activity_stream(session_id: str, activity_id: str):
+    """
+    Download CSV of Strava activity streams for given session/activity.
+    Returns: CSV file attachment.
+    """
+    logger.info("CSV request for activity=%s session=%s", activity_id, session_id)
+
+    token_data = SESSIONS.get(session_id)
+    if not token_data:
+        logger.warning("Invalid session for CSV request: %s", session_id)
+        raise HTTPException(status_code=401, detail="Invalid session ID")
+
+    access_token = token_data.get("access_token")
+    if not access_token:
+        logger.error("Session exists but access_token missing for session: %s", session_id)
+        raise HTTPException(status_code=401, detail="Invalid session data")
+
+    url = f"https://www.strava.com/api/v3/activities/{activity_id}/streams"
+    stream_types = ",".join([
+        "time", "cadence", "velocity_smooth", "distance",
+        "altitude", "grade_smooth", "latlng", "moving"
+    ])
+    logger.debug("Fetching streams for CSV from Strava: %s types=%s", url, stream_types)
+
+    resp = requests.get(
+        url,
+        headers={"Authorization": f"Bearer {access_token}"},
+        params={"keys": stream_types, "key_by_type": "true", "resolution": "high"},
+        timeout=20
+    )
+
+    if resp.status_code != 200:
+        logger.error("Failed to fetch streams for CSV: %s %s", resp.status_code, resp.text)
+        raise HTTPException(status_code=500, detail="Failed to fetch stream data")
+
+    stream_raw = resp.json()
+
+    # Normalize stream arrays: Strava returns {key: {"data":[...]}} or sometimes lists directly
+    keys = ["time", "cadence", "velocity_smooth", "distance", "altitude", "grade_smooth", "latlng", "moving"]
+    arrays = {}
+    for k in keys:
+        v = stream_raw.get(k)
+        if isinstance(v, dict) and "data" in v:
+            arrays[k] = v.get("data") or []
+        else:
+            arrays[k] = v or []
+
+    max_len = max([len(arr) for arr in arrays.values()] + [0])
+    if max_len == 0:
+        logger.warning("No stream arrays found to build CSV for activity %s", activity_id)
+        raise HTTPException(status_code=500, detail="No stream data available for activity")
+
+    # Build CSV in-memory
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["time", "cadence", "speed", "distance", "altitude", "grade_smooth", "lat", "lng", "moving"])
+
+    for i in range(max_len):
+        time_v = arrays["time"][i] if i < len(arrays["time"]) else ""
+        cadence_v = arrays["cadence"][i] if i < len(arrays["cadence"]) else ""
+        speed_v = arrays["velocity_smooth"][i] if i < len(arrays["velocity_smooth"]) else ""
+        distance_v = arrays["distance"][i] if i < len(arrays["distance"]) else ""
+        altitude_v = arrays["altitude"][i] if i < len(arrays["altitude"]) else ""
+        grade_v = arrays["grade_smooth"][i] if i < len(arrays["grade_smooth"]) else ""
+        lat = ""
+        lng = ""
+        if i < len(arrays["latlng"]):
+            coords = arrays["latlng"][i]
+            if isinstance(coords, (list, tuple)) and len(coords) == 2:
+                lat, lng = coords
+        moving_v = arrays["moving"][i] if i < len(arrays["moving"]) else ""
+        writer.writerow([time_v, cadence_v, speed_v, distance_v, altitude_v, grade_v, lat, lng, moving_v])
+
+    csv_text = buf.getvalue()
+    buf.close()
+
+    filename = f"activity_{activity_id}_streams.csv"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    logger.info("Returning CSV for activity %s (rows=%d)", activity_id, max_len)
+    return Response(content=csv_text, media_type="text/csv", headers=headers)
